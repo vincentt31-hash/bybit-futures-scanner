@@ -42,14 +42,14 @@ def _market_name(item):
     return str(item.get("symbol") or item.get("ticker") or item.get("name") or item.get("market_name") or "").strip()
 
 def get_markets():
-    """Load Lighter perpetual market metadata and return normalized records."""
-    # `filter=perp` is supported by Lighter market metadata endpoints.
-    payload = _get("/orderBookDetails", {"filter": "perp"})
-    markets = _list_from(payload, "order_book_details", "orderBookDetails", "order_books", "orderBooks", "list")
+    """Load Lighter market metadata. Lighter's listed markets are perpetuals;
+    request the market list without the unsupported `filter=perp` parameter.
+    """
+    payload = _get("/orderBooks")
+    markets = _list_from(payload, "order_books", "orderBooks", "list")
     if not markets:
-        # Fall back to orderBooks; keep parsing tolerant of API schema variations.
-        payload = _get("/orderBooks", {"filter": "perp"})
-        markets = _list_from(payload, "order_books", "orderBooks", "list")
+        # tolerate alternate response key names, but do not add query filters
+        markets = _list_from(payload, "order_book_details", "orderBookDetails")
     normalized = []
     for item in markets:
         if not isinstance(item, dict):
@@ -57,10 +57,6 @@ def get_markets():
         mid = _market_id(item)
         name = _market_name(item)
         if mid is None or not name:
-            continue
-        # Spot can appear in the broader metadata response. Exclude explicit spot types.
-        typ = str(item.get("type") or item.get("market_type") or item.get("marketType") or "").lower()
-        if "spot" in typ:
             continue
         status = str(item.get("status") or item.get("market_status") or "active").lower()
         if status in {"inactive", "closed", "delisted", "disabled"}:
@@ -71,7 +67,6 @@ def get_markets():
             "status": status,
             "raw": item,
         })
-    # Deduplicate market ids while preserving the first metadata record.
     by_id = {}
     for item in normalized:
         by_id.setdefault(item["market_id"], item)
