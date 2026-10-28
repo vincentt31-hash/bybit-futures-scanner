@@ -59,42 +59,56 @@ def analyze(
         and macd1h[-1] < 0
     )
 
-    # Breakout level is calculated from the 20 prior completed 15m candles,
-    # excluding the latest candle to avoid including the breakout candle itself.
     prior = m15[-21:-1]
     resistance = max(c["high"] for c in prior)
     support = min(c["low"] for c in prior)
-    volume_confirmed = last15["volume"] > volume_sma20[-1]
 
-    # Fibonacci confluence: identify the recent 50-candle swing range.
+    # Correction-confirmation setup on completed 15m candles only.
+    # A prior candle must pull back into the EMA20 / Fibonacci retracement zone.
+    # Latest closed candle then confirms rejection in the higher-timeframe trend.
     swing = m15[-50:]
     swing_low = min(c["low"] for c in swing)
     swing_high = max(c["high"] for c in swing)
     fib = _fib_levels(swing_low, swing_high)
 
-    # A breakout signal should be supported by momentum and remain on the
-    # correct side of the 15m EMA20. Fibonacci is used as a confluence check:
-    # the close must be on the favorable side of the 0.618 retracement.
-    fib_long_ok = bool(fib) and price >= fib["0.618"]
-    fib_short_ok = bool(fib) and price <= fib["0.618"]
+    prev15 = m15[-2]
+    ema20_now = ema20_15m[-1]
+    ema20_prev = ema20_15m[-2]
+    volume_confirmed = last15["volume"] > volume_sma20[-1]
+
+    fib_long_zone = bool(fib) and fib["0.382"] <= prev15["low"] <= fib["0.618"]
+    fib_short_zone = bool(fib) and fib["0.382"] <= prev15["high"] <= fib["0.618"]
+    ema_long_correction = prev15["low"] <= ema20_prev * 1.003
+    ema_short_correction = prev15["high"] >= ema20_prev * 0.997
+
+    # Confirmation: latest fully closed candle reclaims EMA20 and breaks
+    # the previous candle's extreme with a directional close.
+    bullish_confirmation = (
+        last15["close"] > last15["open"]
+        and last15["close"] > prev15["high"]
+        and last15["close"] > ema20_now
+        and rsi15[-1] > 50
+        and macd15[-1] > 0
+    )
+    bearish_confirmation = (
+        last15["close"] < last15["open"]
+        and last15["close"] < prev15["low"]
+        and last15["close"] < ema20_now
+        and rsi15[-1] < 50
+        and macd15[-1] < 0
+    )
 
     long_setup = (
         bullish_trend
-        and price > ema20_15m[-1]
-        and price > resistance
+        and (ema_long_correction or fib_long_zone)
+        and bullish_confirmation
         and volume_confirmed
-        and 50 < rsi15[-1] < 75
-        and macd15[-1] > 0
-        and fib_long_ok
     )
     short_setup = (
         bearish_trend
-        and price < ema20_15m[-1]
-        and price < support
+        and (ema_short_correction or fib_short_zone)
+        and bearish_confirmation
         and volume_confirmed
-        and 25 < rsi15[-1] < 50
-        and macd15[-1] < 0
-        and fib_short_ok
     )
 
     trend = "BULLISH" if bullish_trend else "BEARISH" if bearish_trend else "NEUTRAL"
@@ -127,11 +141,11 @@ def analyze(
 
     # Structural stop with a small ATR buffer.
     if side == "LONG":
-        sl = min(last15["low"], support) - 0.2 * latest_atr
+        sl = min(prev15["low"], last15["low"], support) - 0.2 * latest_atr
         if sl >= price:
             return {"symbol": symbol, "status": "REJECTED", "reason": "Invalid LONG stop"}
     else:
-        sl = max(last15["high"], resistance) + 0.2 * latest_atr
+        sl = max(prev15["high"], last15["high"], resistance) + 0.2 * latest_atr
         if sl <= price:
             return {"symbol": symbol, "status": "REJECTED", "reason": "Invalid SHORT stop"}
 
@@ -155,14 +169,20 @@ def analyze(
         risk_note = "Estimate excludes fees, slippage, funding and liquidation effects."
 
     risk_distance = abs(price - sl)
+    # TP1 must satisfy at least 2:1 reward-to-risk. Higher targets are 3R/4R.
     if side == "LONG":
-        tp1 = price + risk_distance
-        tp2 = price + 2 * risk_distance
-        tp3 = price + 3 * risk_distance
+        tp1 = price + 2 * risk_distance
+        tp2 = price + 3 * risk_distance
+        tp3 = price + 4 * risk_distance
+        rr_tp1 = (tp1 - price) / risk_distance
     else:
-        tp1 = price - risk_distance
-        tp2 = price - 2 * risk_distance
-        tp3 = price - 3 * risk_distance
+        tp1 = price - 2 * risk_distance
+        tp2 = price - 3 * risk_distance
+        tp3 = price - 4 * risk_distance
+        rr_tp1 = (price - tp1) / risk_distance
+
+    if rr_tp1 < 2.0:
+        return {"symbol": symbol, "status": "REJECTED", "reason": "TP1 RR below minimum 1:2"}
 
     # Transparent score, not a calibrated win probability.
     score = 60
@@ -195,7 +215,7 @@ def analyze(
         "notional_usdt": round(notional, 4),
         "leverage": round(leverage, 4),
         "confidence_score": score,
-        "confidence_note": "Heuristic score; not a verified probability of winning.",
+        "confidence_note": "Heuristic score; not a verified probability of winning.",\n        "risk_reward_tp1": round(rr_tp1, 2),
         "risk_note": risk_note,
         "trend_1h": trend,
         "indicators": {
