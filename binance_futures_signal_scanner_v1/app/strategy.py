@@ -215,7 +215,8 @@ def analyze(
         "notional_usdt": round(notional, 4),
         "leverage": round(leverage, 4),
         "confidence_score": score,
-        "confidence_note": "Heuristic score; not a verified probability of winning.",\n        "risk_reward_tp1": round(rr_tp1, 2),
+        "confidence_note": "Heuristic score; not a verified probability of winning.",
+        "risk_reward_tp1": round(rr_tp1, 2),
         "risk_note": risk_note,
         "trend_1h": trend,
         "indicators": {

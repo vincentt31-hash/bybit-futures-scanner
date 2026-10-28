@@ -1,9 +1,8 @@
 import os
 
-# Bybit V5 market-data API. Override with BYBIT_BASE_URL if needed.
-BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.id").rstrip("/")
+BASE_URL = os.getenv("BINANCE_FUTURES_BASE_URL", "https://fapi.binance.com")
 DEFAULT_CAPITAL = float(os.getenv("CAPITAL_USDT", "100"))
-DEFAULT_RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1"))
+DEFAULT_RISK_PERCENT = float(os.getenv("RISK_PERCENT", "10"))
 MAX_LEVERAGE = float(os.getenv("MAX_LEVERAGE", "20"))
 MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "75"))
 WATCHLIST = [
