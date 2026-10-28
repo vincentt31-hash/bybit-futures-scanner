@@ -8,8 +8,18 @@ SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "SHP-FuturesScanner-Lighter/1.0", "Accept": "application/json"})
 
 def _get(path: str, params: dict | None = None):
-    response = SESSION.get(f"{BASE_URL}{path}", params=params or {}, timeout=25)
-    response.raise_for_status()
+    """Make a GET request to Lighter and surface useful diagnostics on HTTP errors."""
+    url = f"{BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    response = SESSION.get(url, params=params or {}, timeout=25)
+    if not response.ok:
+        # Include method and final URL so Render logs distinguish upstream errors
+        # from requests made to SHP's own FastAPI routes.
+        body = response.text[:500].replace("\n", " ")
+        raise requests.HTTPError(
+            f"Lighter upstream HTTP {response.status_code} for GET {response.url}; "
+            f"response: {body}",
+            response=response,
+        )
     payload = response.json()
     # Lighter public REST uses a body code field; API errors can still have HTTP 200.
     code = payload.get("code")
@@ -58,8 +68,12 @@ def get_markets():
         name = _market_name(item)
         if mid is None or not name:
             continue
+        # Lighter's /orderBooks response includes both spot and perpetual markets.
+        market_type = str(item.get("market_type") or item.get("marketType") or "").lower()
+        if market_type != "perp":
+            continue
         status = str(item.get("status") or item.get("market_status") or "active").lower()
-        if status in {"inactive", "closed", "delisted", "disabled"}:
+        if status not in {"active", "open"}:
             continue
         normalized.append({
             "market_id": mid,
