@@ -1,161 +1,108 @@
+"""1-minute scalping signal strategy with a 5-minute trend filter.
+Signals only; this module does not place orders.
+"""
 from .indicators import ema, rsi, sma, macd_histogram, atr
-
-
-def _fib_levels(swing_low, swing_high):
-    """Retracement levels measured from the recent swing range."""
-    span = swing_high - swing_low
-    if span <= 0:
-        return {}
-    return {
-        "0.382": swing_high - 0.382 * span,
-        "0.500": swing_high - 0.500 * span,
-        "0.618": swing_high - 0.618 * span,
-    }
 
 
 def analyze(
     symbol,
-    candles_1h,
-    candles_15m,
+    candles_5m,
+    candles_1m,
     capital=100.0,
     risk_percent=1.0,
     max_leverage=20.0,
     min_confidence=75,
 ):
-    # Only completed candles are used; ignore the currently forming candle.
-    h1 = candles_1h[:-1]
-    m15 = candles_15m[:-1]
-    if len(h1) < 210 or len(m15) < 60:
+    # Exclude currently forming candles to avoid unstable/repainting signals.
+    m5 = candles_5m[:-1]
+    m1 = candles_1m[:-1]
+    if len(m5) < 60 or len(m1) < 60:
         return {"symbol": symbol, "status": "INSUFFICIENT_DATA"}
 
-    closes1 = [c["close"] for c in h1]
-    closes15 = [c["close"] for c in m15]
-    volumes15 = [c["volume"] for c in m15]
+    close5 = [c["close"] for c in m5]
+    close1 = [c["close"] for c in m1]
+    vol1 = [c["volume"] for c in m1]
+    ema20_5 = ema(close5, 20)
+    ema50_5 = ema(close5, 50)
+    rsi5 = rsi(close5, 14)
+    ema9_1 = ema(close1, 9)
+    ema21_1 = ema(close1, 21)
+    rsi1 = rsi(close1, 14)
+    macd1 = macd_histogram(close1, 6, 13, 5)
+    vol_avg = sma(vol1, 20)
+    atr1 = atr(m1, 14)
 
-    ema50_1h = ema(closes1, 50)
-    ema200_1h = ema(closes1, 200)
-    rsi1h = rsi(closes1, 14)
-    macd1h = macd_histogram(closes1)
+    last = m1[-1]
+    prev = m1[-2]
+    price = last["close"]
+    trend_long = ema20_5[-1] > ema50_5[-1] and rsi5[-1] >= 50
+    trend_short = ema20_5[-1] < ema50_5[-1] and rsi5[-1] <= 50
 
-    ema20_15m = ema(closes15, 20)
-    rsi15 = rsi(closes15, 14)
-    macd15 = macd_histogram(closes15)
-    volume_sma20 = sma(volumes15, 20)
-    atr15 = atr(m15, 14)
-
-    last1 = h1[-1]
-    last15 = m15[-1]
-    price = last15["close"]
-
-    # Higher-timeframe trend filter: EMA alignment + momentum.
-    bullish_trend = (
-        ema50_1h[-1] > ema200_1h[-1]
-        and rsi1h[-1] > 50
-        and macd1h[-1] > 0
+    # Momentum crossover/reclaim with volume confirmation.
+    volume_ok = last["volume"] >= vol_avg[-1]
+    long_signal = (
+        trend_long
+        and ema9_1[-1] > ema21_1[-1]
+        and last["close"] > last["open"]
+        and last["close"] > ema9_1[-1]
+        and prev["close"] <= ema9_1[-2]
+        and rsi1[-1] > 50
+        and macd1[-1] > 0
+        and volume_ok
     )
-    bearish_trend = (
-        ema50_1h[-1] < ema200_1h[-1]
-        and rsi1h[-1] < 50
-        and macd1h[-1] < 0
+    short_signal = (
+        trend_short
+        and ema9_1[-1] < ema21_1[-1]
+        and last["close"] < last["open"]
+        and last["close"] < ema9_1[-1]
+        and prev["close"] >= ema9_1[-2]
+        and rsi1[-1] < 50
+        and macd1[-1] < 0
+        and volume_ok
     )
+    trend = "BULLISH" if trend_long else "BEARISH" if trend_short else "NEUTRAL"
+    common = {
+        "symbol": symbol,
+        "last_price": price,
+        "trend_5m": trend,
+        "timeframes": ["5m", "1m"],
+        "indicators": {
+            "ema20_5m": round(ema20_5[-1], 8),
+            "ema50_5m": round(ema50_5[-1], 8),
+            "ema9_1m": round(ema9_1[-1], 8),
+            "ema21_1m": round(ema21_1[-1], 8),
+            "rsi5m": round(rsi5[-1], 2),
+            "rsi1m": round(rsi1[-1], 2),
+            "macd_hist_1m": round(macd1[-1], 8),
+            "volume_confirmed": volume_ok,
+            "atr1m": round(atr1[-1], 8),
+        },
+    }
+    if not (long_signal or short_signal):
+        return {**common, "status": "NO_SIGNAL"}
 
-    prior = m15[-21:-1]
-    resistance = max(c["high"] for c in prior)
-    support = min(c["low"] for c in prior)
-
-    # Correction-confirmation setup on completed 15m candles only.
-    # A prior candle must pull back into the EMA20 / Fibonacci retracement zone.
-    # Latest closed candle then confirms rejection in the higher-timeframe trend.
-    swing = m15[-50:]
-    swing_low = min(c["low"] for c in swing)
-    swing_high = max(c["high"] for c in swing)
-    fib = _fib_levels(swing_low, swing_high)
-
-    prev15 = m15[-2]
-    ema20_now = ema20_15m[-1]
-    ema20_prev = ema20_15m[-2]
-    volume_confirmed = last15["volume"] > volume_sma20[-1]
-
-    fib_long_zone = bool(fib) and fib["0.382"] <= prev15["low"] <= fib["0.618"]
-    fib_short_zone = bool(fib) and fib["0.382"] <= prev15["high"] <= fib["0.618"]
-    ema_long_correction = prev15["low"] <= ema20_prev * 1.003
-    ema_short_correction = prev15["high"] >= ema20_prev * 0.997
-
-    # Confirmation: latest fully closed candle reclaims EMA20 and breaks
-    # the previous candle's extreme with a directional close.
-    bullish_confirmation = (
-        last15["close"] > last15["open"]
-        and last15["close"] > prev15["high"]
-        and last15["close"] > ema20_now
-        and rsi15[-1] > 50
-        and macd15[-1] > 0
-    )
-    bearish_confirmation = (
-        last15["close"] < last15["open"]
-        and last15["close"] < prev15["low"]
-        and last15["close"] < ema20_now
-        and rsi15[-1] < 50
-        and macd15[-1] < 0
-    )
-
-    long_setup = (
-        bullish_trend
-        and (ema_long_correction or fib_long_zone)
-        and bullish_confirmation
-        and volume_confirmed
-    )
-    short_setup = (
-        bearish_trend
-        and (ema_short_correction or fib_short_zone)
-        and bearish_confirmation
-        and volume_confirmed
-    )
-
-    trend = "BULLISH" if bullish_trend else "BEARISH" if bearish_trend else "NEUTRAL"
-
-    if not (long_setup or short_setup):
-        return {
-            "symbol": symbol,
-            "status": "NO_SIGNAL",
-            "last_price": price,
-            "trend_1h": trend,
-            "indicators": {
-                "ema50_1h": round(ema50_1h[-1], 8),
-                "ema200_1h": round(ema200_1h[-1], 8),
-                "ema20_15m": round(ema20_15m[-1], 8),
-                "rsi1h": round(rsi1h[-1], 2),
-                "rsi15m": round(rsi15[-1], 2),
-                "macd_hist_1h": round(macd1h[-1], 8),
-                "macd_hist_15m": round(macd15[-1], 8),
-                "breakout_resistance": round(resistance, 8),
-                "breakout_support": round(support, 8),
-                "fib_382": round(fib.get("0.382", 0), 8),
-                "fib_500": round(fib.get("0.500", 0), 8),
-                "fib_618": round(fib.get("0.618", 0), 8),
-                "volume_confirmed": volume_confirmed,
-            },
-        }
-
-    side = "LONG" if long_setup else "SHORT"
-    latest_atr = atr15[-1]
-
-    # Structural stop with a small ATR buffer.
+    side = "LONG" if long_signal else "SHORT"
+    atr_now = atr1[-1]
+    # Tight structure-based stop with ATR buffer, then exact 2R main target.
     if side == "LONG":
-        sl = min(prev15["low"], last15["low"], support) - 0.2 * latest_atr
+        sl = min(prev["low"], last["low"], price - 0.8 * atr_now)
         if sl >= price:
             return {"symbol": symbol, "status": "REJECTED", "reason": "Invalid LONG stop"}
     else:
-        sl = max(prev15["high"], last15["high"], resistance) + 0.2 * latest_atr
+        sl = max(prev["high"], last["high"], price + 0.8 * atr_now)
         if sl <= price:
             return {"symbol": symbol, "status": "REJECTED", "reason": "Invalid SHORT stop"}
 
-    risk_usdt = capital * risk_percent / 100.0
-    stop_fraction = abs(price - sl) / price
+    risk_distance = abs(price - sl)
+    stop_fraction = risk_distance / price if price else 0
     if stop_fraction <= 0:
         return {"symbol": symbol, "status": "REJECTED", "reason": "Zero stop distance"}
 
+    risk_usdt = capital * risk_percent / 100
     notional = risk_usdt / stop_fraction
     leverage = notional / capital if capital else 0
+    risk_at_stop = risk_usdt
+    risk_note = "Estimate excludes fees, slippage, funding and liquidation effects."
     if leverage > max_leverage:
         notional = capital * max_leverage
         leverage = max_leverage
@@ -164,44 +111,24 @@ def analyze(
             f"Estimated risk at SL is {risk_at_stop:.4f} USDT after leverage cap; "
             "excludes fees, slippage, funding and liquidation effects."
         )
-    else:
-        risk_at_stop = risk_usdt
-        risk_note = "Estimate excludes fees, slippage, funding and liquidation effects."
 
-    risk_distance = abs(price - sl)
-    # TP1 must satisfy at least 2:1 reward-to-risk. Higher targets are 3R/4R.
+    # Keep three target fields for compatibility with existing signal displays.
+    # TP1 = 1R partial, TP2 = the requested 2R primary target, TP3 = 3R extension.
     if side == "LONG":
-        tp1 = price + 2 * risk_distance
-        tp2 = price + 3 * risk_distance
-        tp3 = price + 4 * risk_distance
-        rr_tp1 = (tp1 - price) / risk_distance
+        tp1, tp2, tp3 = price + risk_distance, price + 2 * risk_distance, price + 3 * risk_distance
     else:
-        tp1 = price - 2 * risk_distance
-        tp2 = price - 3 * risk_distance
-        tp3 = price - 4 * risk_distance
-        rr_tp1 = (price - tp1) / risk_distance
+        tp1, tp2, tp3 = price - risk_distance, price - 2 * risk_distance, price - 3 * risk_distance
 
-    if rr_tp1 < 2.0:
-        return {"symbol": symbol, "status": "REJECTED", "reason": "TP1 RR below minimum 1:2"}
-
-    # Transparent score, not a calibrated win probability.
-    score = 60
-    score += 10 if volume_confirmed else 0
-    score += 10 if (rsi15[-1] > 55 if side == "LONG" else rsi15[-1] < 45) else 0
-    score += 10 if (price > fib["0.500"] if side == "LONG" else price < fib["0.500"]) else 0
-    score += 10 if (price > ema20_15m[-1] if side == "LONG" else price < ema20_15m[-1]) else 0
+    score = 60 + (10 if volume_ok else 0)
+    score += 10 if (rsi1[-1] > 55 if side == "LONG" else rsi1[-1] < 45) else 0
+    score += 10 if (ema9_1[-1] > ema21_1[-1] if side == "LONG" else ema9_1[-1] < ema21_1[-1]) else 0
+    score += 10 if (trend_long if side == "LONG" else trend_short) else 0
     score = min(score, 90)
-
     if score < min_confidence:
-        return {
-            "symbol": symbol,
-            "status": "FILTERED",
-            "confidence_score": score,
-            "trend_1h": trend,
-        }
+        return {**common, "status": "FILTERED", "confidence_score": score}
 
     return {
-        "symbol": symbol,
+        **common,
         "status": "SIGNAL",
         "side": side,
         "entry": round(price, 8),
@@ -216,23 +143,7 @@ def analyze(
         "leverage": round(leverage, 4),
         "confidence_score": score,
         "confidence_note": "Heuristic score; not a verified probability of winning.",
-        "risk_reward_tp1": round(rr_tp1, 2),
+        "risk_reward_tp1": 1.0,
+        "risk_reward_main_target": 2.0,
         "risk_note": risk_note,
-        "trend_1h": trend,
-        "indicators": {
-            "ema50_1h": round(ema50_1h[-1], 8),
-            "ema200_1h": round(ema200_1h[-1], 8),
-            "ema20_15m": round(ema20_15m[-1], 8),
-            "rsi1h": round(rsi1h[-1], 2),
-            "rsi15m": round(rsi15[-1], 2),
-            "macd_hist_1h": round(macd1h[-1], 8),
-            "macd_hist_15m": round(macd15[-1], 8),
-            "breakout_resistance": round(resistance, 8),
-            "breakout_support": round(support, 8),
-            "fib_382": round(fib["0.382"], 8),
-            "fib_500": round(fib["0.500"], 8),
-            "fib_618": round(fib["0.618"], 8),
-            "volume_confirmed": volume_confirmed,
-        },
-        "timeframes": ["1h", "15m"],
     }

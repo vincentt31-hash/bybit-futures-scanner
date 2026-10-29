@@ -14,7 +14,7 @@ from .bybit import (
 from .strategy import analyze
 
 app = FastAPI(
-    title="Bybit Indonesia Spot USDT Signal Scanner",
+    title="Bybit Indonesia Scalping Signal Scanner",
     version="0.4.0",
     description="Signal-only scanner for active Bybit Indonesia USDT spot pairs. No order execution.",
 )
@@ -46,7 +46,7 @@ def get_active_symbols(request: ScanRequest):
 @app.get("/")
 def root():
     return {
-        "name": "Bybit Indonesia Spot USDT Signal Scanner",
+        "name": "Bybit Indonesia Scalping Signal Scanner",
         "version": "0.4.0",
         "mode": "signal-only",
         "exchange_data": "Bybit Indonesia V5 spot",
@@ -94,10 +94,10 @@ def scan_default():
 
 def scan_one(symbol, request, latest_prices):
     try:
-        h1 = get_klines(symbol, "1h", 250)
-        m15 = get_klines(symbol, "15m", 250)
+        m5 = get_klines(symbol, "5m", 250)
+        m1 = get_klines(symbol, "1m", 250)
         result = analyze(
-            symbol, h1, m15,
+            symbol, m5, m1,
             capital=request.capital_usdt,
             risk_percent=request.risk_percent,
             max_leverage=request.max_leverage,

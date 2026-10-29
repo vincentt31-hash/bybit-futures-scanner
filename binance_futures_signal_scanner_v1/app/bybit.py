@@ -10,6 +10,8 @@ SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "SHP-SpotScanner/1.0", "Accept": "application/json"})
 
 _INTERVALS = {
+    "1m": ("1", 60 * 1000),
+    "5m": ("5", 5 * 60 * 1000),
     "15m": ("15", 15 * 60 * 1000),
     "1h": ("60", 60 * 60 * 1000),
     "15": ("15", 15 * 60 * 1000),
