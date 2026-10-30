@@ -1,149 +1,308 @@
-"""1-minute scalping signal strategy with a 5-minute trend filter.
-Signals only; this module does not place orders.
-"""
-from .indicators import ema, rsi, sma, macd_histogram, atr
-
-
 def analyze(
-    symbol,
-    candles_5m,
-    candles_1m,
-    capital=100.0,
-    risk_percent=1.0,
-    max_leverage=20.0,
-    min_confidence=75,
-):
-    # Exclude currently forming candles to avoid unstable/repainting signals.
-    m5 = candles_5m[:-1]
-    m1 = candles_1m[:-1]
-    if len(m5) < 60 or len(m1) < 60:
-        return {"symbol": symbol, "status": "INSUFFICIENT_DATA"}
+    symbol: str,
+    candles_5m: List[Dict[str, Any]],
+    candles_1m: List[Dict[str, Any]],
+    capital: float = 100.0,
+    risk_percent: float = 1.0,
+    max_leverage: float = 10.0,
+    min_confidence: int = 0,
+    min_rr: float = 2.0,
+    include_latest: bool = False,
+) -> Dict[str, Any]:
+    """
+    Scalping strategy:
+    - Entry timeframe: 1 minute
+    - Trend filter: 5 minutes
+    - Risk reward: 1:2
+    - Signal only, no order execution
+    """
 
-    close5 = [c["close"] for c in m5]
-    close1 = [c["close"] for c in m1]
-    vol1 = [c["volume"] for c in m1]
-    ema20_5 = ema(close5, 20)
-    ema50_5 = ema(close5, 50)
-    rsi5 = rsi(close5, 14)
-    ema9_1 = ema(close1, 9)
-    ema21_1 = ema(close1, 21)
-    rsi1 = rsi(close1, 14)
-    macd1 = macd_histogram(close1, 6, 13, 5)
-    vol_avg = sma(vol1, 20)
-    atr1 = atr(m1, 14)
+    symbol = str(symbol).upper().replace("/", "").replace(".P", "")
 
-    last = m1[-1]
-    prev = m1[-2]
-    price = last["close"]
-    trend_long = ema20_5[-1] > ema50_5[-1] and rsi5[-1] >= 50
-    trend_short = ema20_5[-1] < ema50_5[-1] and rsi5[-1] <= 50
+    def no_signal(reason: str) -> Dict[str, Any]:
+        return {
+            "symbol": symbol,
+            "signal": "NO_SIGNAL",
+            "status": "NO_SIGNAL",
+            "reason": reason,
+            "timeframe_entry": "1m",
+            "timeframe_trend": "5m",
+        }
 
-    # Momentum crossover/reclaim with volume confirmation.
-    volume_ok = last["volume"] >= vol_avg[-1]
-    long_signal = (
-        trend_long
-        and ema9_1[-1] > ema21_1[-1]
-        and last["close"] > last["open"]
-        and last["close"] > ema9_1[-1]
-        and prev["close"] <= ema9_1[-2]
-        and rsi1[-1] > 50
-        and macd1[-1] > 0
-        and volume_ok
-    )
-    short_signal = (
-        trend_short
-        and ema9_1[-1] < ema21_1[-1]
-        and last["close"] < last["open"]
-        and last["close"] < ema9_1[-1]
-        and prev["close"] >= ema9_1[-2]
-        and rsi1[-1] < 50
-        and macd1[-1] < 0
-        and volume_ok
-    )
-    trend = "BULLISH" if trend_long else "BEARISH" if trend_short else "NEUTRAL"
-    common = {
-        "symbol": symbol,
-        "last_price": price,
-        "trend_5m": trend,
-        "timeframes": ["5m", "1m"],
-        "indicators": {
-            "ema20_5m": round(ema20_5[-1], 8),
-            "ema50_5m": round(ema50_5[-1], 8),
-            "ema9_1m": round(ema9_1[-1], 8),
-            "ema21_1m": round(ema21_1[-1], 8),
-            "rsi5m": round(rsi5[-1], 2),
-            "rsi1m": round(rsi1[-1], 2),
-            "macd_hist_1m": round(macd1[-1], 8),
-            "volume_confirmed": volume_ok,
-            "atr1m": round(atr1[-1], 8),
-        },
-    }
-    if not (long_signal or short_signal):
-        return {**common, "status": "NO_SIGNAL"}
+    # ---------------------------------------------------------
+    # VALIDATION
+    # ---------------------------------------------------------
 
-    side = "LONG" if long_signal else "SHORT"
-    atr_now = atr1[-1]
-    # Tight structure-based stop with ATR buffer, then exact 2R main target.
-    if side == "LONG":
-        sl = min(prev["low"], last["low"], price - 0.8 * atr_now)
-        if sl >= price:
-            return {"symbol": symbol, "status": "REJECTED", "reason": "Invalid LONG stop"}
+    if not candles_5m or not candles_1m:
+        return no_signal("No candle data")
+
+    if capital <= 0:
+        return no_signal("Capital must be greater than zero")
+
+    if risk_percent <= 0:
+        return no_signal("Risk percent must be greater than zero")
+
+    if max_leverage < 1:
+        return no_signal("Leverage must be at least 1")
+
+    if min_rr <= 0:
+        return no_signal("Risk reward must be greater than zero")
+
+    # Exclude the latest candle if it is still forming.
+    if include_latest:
+        c5 = candles_5m
+        c1 = candles_1m
     else:
-        sl = max(prev["high"], last["high"], price + 0.8 * atr_now)
-        if sl <= price:
-            return {"symbol": symbol, "status": "REJECTED", "reason": "Invalid SHORT stop"}
+        c5 = candles_5m[:-1]
+        c1 = candles_1m[:-1]
 
-    risk_distance = abs(price - sl)
-    stop_fraction = risk_distance / price if price else 0
-    if stop_fraction <= 0:
-        return {"symbol": symbol, "status": "REJECTED", "reason": "Zero stop distance"}
+    if len(c5) < 60 or len(c1) < 40:
+        return no_signal("Insufficient closed candles")
 
-    risk_usdt = capital * risk_percent / 100
-    notional = risk_usdt / stop_fraction
-    leverage = notional / capital if capital else 0
-    risk_at_stop = risk_usdt
-    risk_note = "Estimate excludes fees, slippage, funding and liquidation effects."
-    if leverage > max_leverage:
-        notional = capital * max_leverage
-        leverage = max_leverage
-        risk_at_stop = notional * stop_fraction
-        risk_note = (
-            f"Estimated risk at SL is {risk_at_stop:.4f} USDT after leverage cap; "
-            "excludes fees, slippage, funding and liquidation effects."
+    # ---------------------------------------------------------
+    # PRICE DATA
+    # ---------------------------------------------------------
+
+    try:
+        close5 = [float(c["close"]) for c in c5]
+        close1 = [float(c["close"]) for c in c1]
+
+        if any(price <= 0 for price in close5 + close1):
+            return no_signal("Invalid candle price")
+
+    except (KeyError, TypeError, ValueError):
+        return no_signal("Invalid candle format")
+
+    # ---------------------------------------------------------
+    # INDICATORS
+    # ---------------------------------------------------------
+
+    ema20_5m = ema(close5, 20)
+    ema50_5m = ema(close5, 50)
+
+    ema9_1m = ema(close1, 9)
+    ema21_1m = ema(close1, 21)
+
+    rsi1m = rsi(close1, 14)
+    atr1m = atr(c1, 14)
+
+    i = len(c1) - 1
+    j = len(c5) - 1
+
+    required = [
+        ema20_5m[j],
+        ema50_5m[j],
+        ema9_1m[i],
+        ema21_1m[i],
+        rsi1m[i],
+        atr1m[i],
+        ema9_1m[i - 1],
+    ]
+
+    if any(value is None for value in required):
+        return no_signal("Indicators not ready")
+
+    # ---------------------------------------------------------
+    # CURRENT CANDLE
+    # ---------------------------------------------------------
+
+    last = c1[i]
+    previous = c1[i - 1]
+
+    entry = float(last["close"])
+    current_atr = float(atr1m[i])
+    current_rsi = float(rsi1m[i])
+
+    if entry <= 0 or current_atr <= 0:
+        return no_signal("Invalid ATR or entry price")
+
+    # ---------------------------------------------------------
+    # 5M TREND FILTER
+    # ---------------------------------------------------------
+
+    trend_up = (
+        close5[j] > ema20_5m[j] > ema50_5m[j]
+    )
+
+    trend_down = (
+        close5[j] < ema20_5m[j] < ema50_5m[j]
+    )
+
+    # ---------------------------------------------------------
+    # VOLUME FILTER
+    # ---------------------------------------------------------
+
+    try:
+        volumes = [
+            float(c.get("volume", 0))
+            for c in c1
+        ]
+    except (TypeError, ValueError):
+        return no_signal("Invalid volume data")
+
+    average_volume = (
+        sum(volumes[-21:-1]) / 20
+        if len(volumes) >= 21
+        else 0
+    )
+
+    volume_confirmed = (
+        average_volume > 0
+        and volumes[i] >= average_volume * 1.05
+    )
+
+    # ---------------------------------------------------------
+    # LONG SETUP
+    # ---------------------------------------------------------
+
+    long_signal = (
+        trend_up
+        and ema9_1m[i] > ema21_1m[i]
+
+        # Pullback toward EMA9
+        and float(previous["close"]) <= ema9_1m[i - 1]
+
+        # Reclaim EMA9
+        and entry > ema9_1m[i]
+
+        # Bullish candle
+        and float(last["close"]) > float(last["open"])
+
+        # Avoid chasing overbought price
+        and 50 <= current_rsi <= 68
+    )
+
+    # ---------------------------------------------------------
+    # SHORT SETUP
+    # ---------------------------------------------------------
+
+    short_signal = (
+        trend_down
+        and ema9_1m[i] < ema21_1m[i]
+
+        # Pullback toward EMA9
+        and float(previous["close"]) >= ema9_1m[i - 1]
+
+        # Rejection below EMA9
+        and entry < ema9_1m[i]
+
+        # Bearish candle
+        and float(last["close"]) < float(last["open"])
+
+        # Avoid chasing oversold price
+        and 32 <= current_rsi <= 50
+    )
+
+    # ---------------------------------------------------------
+    # FILTER VALIDATION
+    # ---------------------------------------------------------
+
+    if not volume_confirmed:
+        return no_signal("Volume filter not met")
+
+    if not long_signal and not short_signal:
+        return no_signal("No aligned 1m pullback trigger")
+
+    # ---------------------------------------------------------
+    # DIRECTION AND RISK
+    # ---------------------------------------------------------
+
+    if long_signal:
+        direction = "LONG"
+
+        stop_loss = min(
+            float(last["low"]),
+            entry - 1.2 * current_atr,
         )
 
-    # Keep three target fields for compatibility with existing signal displays.
-    # TP1 = 1R partial, TP2 = the requested 2R primary target, TP3 = 3R extension.
-    if side == "LONG":
-        tp1, tp2, tp3 = price + risk_distance, price + 2 * risk_distance, price + 3 * risk_distance
-    else:
-        tp1, tp2, tp3 = price - risk_distance, price - 2 * risk_distance, price - 3 * risk_distance
+        risk = entry - stop_loss
 
-    score = 60 + (10 if volume_ok else 0)
-    score += 10 if (rsi1[-1] > 55 if side == "LONG" else rsi1[-1] < 45) else 0
-    score += 10 if (ema9_1[-1] > ema21_1[-1] if side == "LONG" else ema9_1[-1] < ema21_1[-1]) else 0
-    score += 10 if (trend_long if side == "LONG" else trend_short) else 0
-    score = min(score, 90)
-    if score < min_confidence:
-        return {**common, "status": "FILTERED", "confidence_score": score}
+        take_profit = entry + min_rr * risk
+
+    else:
+        direction = "SHORT"
+
+        stop_loss = max(
+            float(last["high"]),
+            entry + 1.2 * current_atr,
+        )
+
+        risk = stop_loss - entry
+
+        take_profit = entry - min_rr * risk
+
+    if risk <= 0 or take_profit <= 0:
+        return no_signal("Invalid risk geometry")
+
+    # ---------------------------------------------------------
+    # POSITION SIZE
+    # ---------------------------------------------------------
+
+    risk_amount = capital * (risk_percent / 100.0)
+
+    # Quantity based on the risk budget and stop-loss distance.
+    position_qty = risk_amount / risk
+
+    # Cap notional exposure using the requested leverage.
+    max_position_value = capital * max_leverage
+    max_position_qty = max_position_value / entry
+
+    position_qty = min(position_qty, max_position_qty)
+
+    position_value = position_qty * entry
+
+    estimated_loss = position_qty * risk
+
+    # ---------------------------------------------------------
+    # CONFIDENCE SCORE
+    # ---------------------------------------------------------
+
+    confidence = 78
+
+    if volume_confirmed:
+        confidence += 5
+
+    if abs(current_rsi - 50) >= 5:
+        confidence += 3
+
+    confidence = min(confidence, 88)
+
+    if confidence < min_confidence:
+        return no_signal(
+            f"Confidence {confidence} below minimum {min_confidence}"
+        )
+
+    # ---------------------------------------------------------
+    # RETURN SIGNAL
+    # ---------------------------------------------------------
 
     return {
-        **common,
-        "status": "SIGNAL",
-        "side": side,
-        "entry": round(price, 8),
-        "tp1": round(tp1, 8),
-        "tp2": round(tp2, 8),
-        "tp3": round(tp3, 8),
-        "sl": round(sl, 8),
-        "capital_usdt": round(capital, 2),
-        "risk_budget_usdt": round(risk_usdt, 2),
-        "estimated_risk_at_sl_usdt": round(risk_at_stop, 4),
-        "notional_usdt": round(notional, 4),
-        "leverage": round(leverage, 4),
-        "confidence_score": score,
-        "confidence_note": "Heuristic score; not a verified probability of winning.",
-        "risk_reward_tp1": 1.0,
-        "risk_reward_main_target": 2.0,
-        "risk_note": risk_note,
+        "symbol": symbol,
+        "signal": direction,
+        "status": direction,
+
+        "entry": round(entry, 8),
+        "stop_loss": round(stop_loss, 8),
+        "take_profit": round(take_profit, 8),
+
+        "rr": float(min_rr),
+        "confidence": confidence,
+
+        "capital": round(capital, 2),
+        "risk_percent": float(risk_percent),
+        "risk_amount": round(risk_amount, 8),
+
+        "position_qty": round(position_qty, 8),
+        "position_value": round(position_value, 8),
+        "estimated_loss": round(estimated_loss, 8),
+
+        "max_leverage": float(max_leverage),
+
+        "reason": (
+            "5m trend + 1m EMA pullback/reclaim "
+            "+ volume confirmation"
+        ),
+
+        "timeframe_entry": "1m",
+        "timeframe_trend": "5m",
     }
