@@ -275,6 +275,22 @@ def analyze(
     # ---------------------------------------------------------
     # RETURN SIGNAL
     # ---------------------------------------------------------
+	    trend_5m = (
+        "UP" if trend_up
+        else "DOWN" if trend_down
+        else "SIDEWAYS"
+    )
+
+    indicator_data = {
+        "ema20_5m": round(float(ema20_5m[j]), 8),
+        "ema50_5m": round(float(ema50_5m[j]), 8),
+        "ema9_1m": round(float(ema9_1m[i]), 8),
+        "ema21_1m": round(float(ema21_1m[i]), 8),
+        "rsi_1m": round(float(rsi1m[i]), 4),
+        "atr_1m": round(float(atr1m[i]), 8),
+        "trend_5m": trend_5m,
+        "volume_confirmed": volume_confirmed,
+    }
 
     return {
         "symbol": symbol,
@@ -305,4 +321,6 @@ def analyze(
 
         "timeframe_entry": "1m",
         "timeframe_trend": "5m",
+
+	"indicators": indicator_data,
     }
