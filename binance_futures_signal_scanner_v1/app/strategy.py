@@ -1,3 +1,5 @@
+from indicators import ema, rsi, atr
+
 def analyze(
     symbol: str,
     candles_5m: List[Dict[str, Any]],
