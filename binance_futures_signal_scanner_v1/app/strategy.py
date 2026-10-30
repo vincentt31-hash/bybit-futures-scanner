@@ -275,7 +275,7 @@ def analyze(
     # ---------------------------------------------------------
     # RETURN SIGNAL
     # ---------------------------------------------------------
-	    trend_5m = (
+    trend_5m = (
         "UP" if trend_up
         else "DOWN" if trend_down
         else "SIDEWAYS"
@@ -322,5 +322,5 @@ def analyze(
         "timeframe_entry": "1m",
         "timeframe_trend": "5m",
 
-	"indicators": indicator_data,
+        "indicators": indicator_data,
     }
