@@ -1,4 +1,6 @@
-from indicators import ema, rsi, atr
+from typing import Any, Dict, List
+
+from .indicators import ema, rsi, atr
 
 def analyze(
     symbol: str,
