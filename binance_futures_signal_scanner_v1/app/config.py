@@ -6,7 +6,8 @@ BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.id").rstrip("/")
 DEFAULT_CAPITAL = float(os.getenv("CAPITAL_USDT", "100"))
 DEFAULT_RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1"))
 MAX_LEVERAGE = float(os.getenv("MAX_LEVERAGE", "20"))
-MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "75"))
+# New scoring: base 60, max 90. 75 filters out many valid setups.
+MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "60"))
 
 # Active Bybit Indonesia USDT spot pairs only.
 WATCHLIST = [

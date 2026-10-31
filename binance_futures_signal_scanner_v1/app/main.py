@@ -1,3 +1,4 @@
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastapi import FastAPI
@@ -143,8 +144,17 @@ def scan(request: ScanRequest):
             results_by_symbol[symbol] = future.result()
 
     results = [results_by_symbol[symbol] for symbol in symbols]
+
+    # Diagnostic: how many pairs ended in each outcome / reason.
+    reason_summary = Counter(
+        r.get("signal") if r.get("signal") in ("LONG", "SHORT")
+        else (r.get("reason") or r.get("status") or "unknown")
+        for r in results
+    )
     return {
         "count": len(results),
+        "signal_count": sum(1 for r in results if r.get("signal") in ("LONG", "SHORT")),
+        "reason_summary": dict(reason_summary.most_common()),
         "selection": "top_24h_usdt_turnover" if request.auto_top_volume else "manual_live_validated",
         "quote_coin": QUOTE_COIN,
         "symbols": symbols,
