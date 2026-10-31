@@ -301,10 +301,30 @@ def analyze(
     # RETURN SIGNAL
     # ---------------------------------------------------------
 
+    # R-multiples for the app's TP1/TP2/TP3 fields (TP2 = main RR target)
+    sign = 1 if direction == "LONG" else -1
+    tp1 = entry + sign * 1.0 * risk
+    tp2 = take_profit
+    tp3 = entry + sign * (rr + 1.0) * risk
+
     return {
         "symbol": symbol,
         "signal": direction,
-        "status": direction,
+        # The Android app only treats status == "SIGNAL" as an active call
+        # and reads the direction from "side".
+        "status": "SIGNAL",
+        "side": direction,
+
+        # Field names expected by the Android app
+        "tp1": round(tp1, 8),
+        "tp2": round(tp2, 8),
+        "tp3": round(tp3, 8),
+        "sl": round(stop_loss, 8),
+        "confidence_score": confidence,
+        "capital_usdt": round(capital, 2),
+        "risk_budget_usdt": round(risk_amount, 8),
+        "estimated_risk_at_sl_usdt": round(estimated_loss, 8),
+        "notional_usdt": round(position_value, 8),
 
         "entry": round(entry, 8),
         "stop_loss": round(stop_loss, 8),
@@ -322,7 +342,7 @@ def analyze(
         "estimated_loss": round(estimated_loss, 8),
 
         "max_leverage": float(max_leverage),
-        "leverage": leverage_used,
+        "leverage": float(leverage_used),
 
         "reason": (
             "5m trend + 1m EMA9 pullback/"
