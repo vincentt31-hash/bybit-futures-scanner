@@ -6,6 +6,10 @@ from .indicators import ema, rsi, atr
 # Hard floor: the strategy never returns a trade with RR below 1:2.
 MIN_RR_FLOOR = 2.0
 
+# Stop distance limits (as fraction of entry price)
+MIN_STOP_PCT = 0.005   # stop never tighter than 0.5%
+MAX_STOP_PCT = 0.04    # stop never wider than 4%
+
 
 def analyze(
     symbol: str,
@@ -220,26 +224,35 @@ def analyze(
 
     # ---------------------------------------------------------
     # STOP LOSS / TAKE PROFIT (RR >= 1:2)
-    # Stop goes beyond the recent swing, clamped to 0.8x-2.0x ATR
-    # so it is neither noise-tight nor too wide.
+    # Wider, 5m-based stop: beyond the last 30 minutes of 5m swing,
+    # kept between MIN_STOP_PCT of price (or 1.5x 5m ATR) and
+    # a cap (3x 5m ATR, never above MAX_STOP_PCT).
     # ---------------------------------------------------------
 
-    swing_window = c1[i - 4:i + 1]
+    atr5_series = atr(c5, 14)
+    atr5 = float(atr5_series[j]) if atr5_series else current_atr
+    if atr5 <= 0:
+        atr5 = current_atr
+
+    stop_floor = max(1.5 * atr5, MIN_STOP_PCT * entry)
+    stop_cap = max(stop_floor, min(max(3.0 * atr5, 1.5 * stop_floor), MAX_STOP_PCT * entry))
+
+    swing5 = c5[-6:]
 
     if long_signal:
         direction = "LONG"
-        swing_low = min(float(c["low"]) for c in swing_window)
-        raw_stop = swing_low - 0.1 * current_atr
+        swing_low = min(float(c["low"]) for c in swing5)
+        raw_stop = swing_low - 0.25 * atr5
         risk = entry - raw_stop
-        risk = min(max(risk, 0.8 * current_atr), 2.0 * current_atr)
+        risk = min(max(risk, stop_floor), stop_cap)
         stop_loss = entry - risk
         take_profit = entry + rr * risk
     else:
         direction = "SHORT"
-        swing_high = max(float(c["high"]) for c in swing_window)
-        raw_stop = swing_high + 0.1 * current_atr
+        swing_high = max(float(c["high"]) for c in swing5)
+        raw_stop = swing_high + 0.25 * atr5
         risk = raw_stop - entry
-        risk = min(max(risk, 0.8 * current_atr), 2.0 * current_atr)
+        risk = min(max(risk, stop_floor), stop_cap)
         stop_loss = entry + risk
         take_profit = entry - rr * risk
 
@@ -248,24 +261,31 @@ def analyze(
 
     # ---------------------------------------------------------
     # POSITION SIZE + LEVERAGE
+    # Max loss at stop = risk_percent of capital (app default 10%).
+    #   notional = max_loss / stop_distance_pct
+    #   leverage = notional / capital (rounded up, capped)
+    #   margin   = notional / leverage  (USDT to commit)
     # ---------------------------------------------------------
 
     risk_amount = capital * (risk_percent / 100.0)
-    position_qty = risk_amount / risk
+    stop_pct = risk / entry
+
+    notional_target = risk_amount / stop_pct
 
     # Leverage cap: user's max, and a liquidation-safety limit so the
     # stop is hit well before liquidation (~80% of 1/leverage).
-    stop_pct = risk / entry
     safe_leverage = max(1, int(math.floor(0.8 / stop_pct)))
     effective_max_leverage = max(1.0, min(float(max_leverage), float(safe_leverage)))
 
-    max_position_qty = (capital * effective_max_leverage) / entry
-    position_qty = min(position_qty, max_position_qty)
+    notional = min(notional_target, capital * effective_max_leverage)
+    leverage_used = int(min(max(1, math.ceil(notional / capital)), effective_max_leverage))
+    leverage_used = max(1, leverage_used)
 
-    position_value = position_qty * entry
-    estimated_loss = position_qty * risk
-    leverage_used = max(1, int(math.ceil(position_value / capital)))
-    leverage_used = int(min(leverage_used, effective_max_leverage))
+    position_value = notional
+    position_qty = notional / entry
+    margin_usdt = notional / leverage_used
+    estimated_loss = notional * stop_pct
+    estimated_profit = notional * stop_pct * rr
 
     # ---------------------------------------------------------
     # CONFIDENCE SCORE
@@ -325,6 +345,9 @@ def analyze(
         "risk_budget_usdt": round(risk_amount, 8),
         "estimated_risk_at_sl_usdt": round(estimated_loss, 8),
         "notional_usdt": round(position_value, 8),
+        "margin_usdt": round(margin_usdt, 4),
+        "stop_distance_pct": round(stop_pct * 100, 3),
+        "estimated_profit_tp2_usdt": round(estimated_profit, 8),
 
         "entry": round(entry, 8),
         "stop_loss": round(stop_loss, 8),
