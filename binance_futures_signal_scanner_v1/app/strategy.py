@@ -2,6 +2,7 @@ from typing import Any, Dict, List
 
 from .indicators import ema, rsi, atr
 
+
 def analyze(
     symbol: str,
     candles_5m: List[Dict[str, Any]],
@@ -23,6 +24,19 @@ def analyze(
 
     symbol = str(symbol).upper().replace("/", "").replace(".P", "")
 
+    # Object indicators selalu dikirim di semua response,
+    # nilainya null sampai indikator berhasil dihitung.
+    indicators_out: Dict[str, Any] = {
+        "ema20_5m": None,
+        "ema50_5m": None,
+        "ema9_1m": None,
+        "ema21_1m": None,
+        "rsi_1m": None,
+        "atr_1m": None,
+        "trend_5m": None,
+        "volume_confirmed": None,
+    }
+
     def no_signal(reason: str) -> Dict[str, Any]:
         return {
             "symbol": symbol,
@@ -31,6 +45,7 @@ def analyze(
             "reason": reason,
             "timeframe_entry": "1m",
             "timeframe_trend": "5m",
+            "indicators": indicators_out,
         }
 
     # ---------------------------------------------------------
@@ -117,30 +132,36 @@ def analyze(
     current_atr = float(atr1m[i])
     current_rsi = float(rsi1m[i])
 
-    if entry <= 0 or current_atr <= 0:
-        return no_signal("Invalid ATR or entry price")
-
     # ---------------------------------------------------------
     # 5M TREND FILTER
     # ---------------------------------------------------------
 
-    trend_up = (
-        close5[j] > ema20_5m[j] > ema50_5m[j]
-    )
+    trend_up = close5[j] > ema20_5m[j] > ema50_5m[j]
+    trend_down = close5[j] < ema20_5m[j] < ema50_5m[j]
 
-    trend_down = (
-        close5[j] < ema20_5m[j] < ema50_5m[j]
-    )
+    trend_5m = "UP" if trend_up else "DOWN" if trend_down else "SIDEWAYS"
+
+    # Isi indicators segera setelah dihitung, supaya ikut terkirim
+    # di semua jalur NO_SIGNAL berikutnya.
+    indicators_out.update({
+        "ema20_5m": round(float(ema20_5m[j]), 8),
+        "ema50_5m": round(float(ema50_5m[j]), 8),
+        "ema9_1m": round(float(ema9_1m[i]), 8),
+        "ema21_1m": round(float(ema21_1m[i]), 8),
+        "rsi_1m": round(current_rsi, 4),
+        "atr_1m": round(current_atr, 8),
+        "trend_5m": trend_5m,
+    })
+
+    if entry <= 0 or current_atr <= 0:
+        return no_signal("Invalid ATR or entry price")
 
     # ---------------------------------------------------------
     # VOLUME FILTER
     # ---------------------------------------------------------
 
     try:
-        volumes = [
-            float(c.get("volume", 0))
-            for c in c1
-        ]
+        volumes = [float(c.get("volume", 0)) for c in c1]
     except (TypeError, ValueError):
         return no_signal("Invalid volume data")
 
@@ -154,6 +175,8 @@ def analyze(
         average_volume > 0
         and volumes[i] >= average_volume * 1.05
     )
+
+    indicators_out["volume_confirmed"] = volume_confirmed
 
     # ---------------------------------------------------------
     # LONG SETUP
@@ -279,22 +302,6 @@ def analyze(
     # ---------------------------------------------------------
     # RETURN SIGNAL
     # ---------------------------------------------------------
-    trend_5m = (
-        "UP" if trend_up
-        else "DOWN" if trend_down
-        else "SIDEWAYS"
-    )
-
-    indicator_data = {
-        "ema20_5m": round(float(ema20_5m[j]), 8),
-        "ema50_5m": round(float(ema50_5m[j]), 8),
-        "ema9_1m": round(float(ema9_1m[i]), 8),
-        "ema21_1m": round(float(ema21_1m[i]), 8),
-        "rsi_1m": round(float(rsi1m[i]), 4),
-        "atr_1m": round(float(atr1m[i]), 8),
-        "trend_5m": trend_5m,
-        "volume_confirmed": volume_confirmed,
-    }
 
     return {
         "symbol": symbol,
@@ -326,5 +333,5 @@ def analyze(
         "timeframe_entry": "1m",
         "timeframe_trend": "5m",
 
-        "indicators": indicator_data,
+        "indicators": indicators_out,
     }

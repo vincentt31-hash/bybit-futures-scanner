@@ -31,17 +31,19 @@ def rsi(values, period=14):
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
     out = [50.0] * period
+
     def calc(g, l):
         if l == 0:
             return 100.0 if g > 0 else 50.0
         return 100 - (100 / (1 + g / l))
+
     out.append(calc(avg_gain, avg_loss))
     for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
         out.append(calc(avg_gain, avg_loss))
-    # align to values length
-    return ([50.0] + out)[:len(values)]
+    # out sudah sepanjang len(values), index-nya sejajar dengan values
+    return out
 
 
 def macd_histogram(values, fast=12, slow=26, signal=9):
