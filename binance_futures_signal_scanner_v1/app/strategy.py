@@ -1,6 +1,10 @@
+import math
 from typing import Any, Dict, List
 
 from .indicators import ema, rsi, atr
+
+# Hard floor: the strategy never returns a trade with RR below 1:2.
+MIN_RR_FLOOR = 2.0
 
 
 def analyze(
@@ -15,17 +19,18 @@ def analyze(
     include_latest: bool = False,
 ) -> Dict[str, Any]:
     """
-    Scalping strategy:
-    - Entry timeframe: 1 minute
-    - Trend filter: 5 minutes
-    - Risk reward: 1:2
+    Scalping strategy (LONG and SHORT):
+    - Trend filter : 5m  (EMA20 vs EMA50 + price vs EMA50)
+    - Entry        : 1m  (pullback to EMA9/EMA21, then reclaim/reject EMA9)
+    - Risk reward  : minimum 1:2 (never lower)
+    - Leverage     : position size capped by max_leverage, and by a
+                     liquidation-safety limit based on stop distance
     - Signal only, no order execution
     """
 
     symbol = str(symbol).upper().replace("/", "").replace(".P", "")
 
-    # Object indicators selalu dikirim di semua response,
-    # nilainya null sampai indikator berhasil dihitung.
+    # indicators object is ALWAYS returned (null until calculated)
     indicators_out: Dict[str, Any] = {
         "ema20_5m": None,
         "ema50_5m": None,
@@ -67,6 +72,8 @@ def analyze(
     if min_rr <= 0:
         return no_signal("Risk reward must be greater than zero")
 
+    rr = max(float(min_rr), MIN_RR_FLOOR)
+
     # Exclude the latest candle if it is still forming.
     if include_latest:
         c5 = candles_5m
@@ -75,7 +82,7 @@ def analyze(
         c5 = candles_5m[:-1]
         c1 = candles_1m[:-1]
 
-    if len(c5) < 60 or len(c1) < 40:
+    if len(c5) < 55 or len(c1) < 40:
         return no_signal("Insufficient closed candles")
 
     # ---------------------------------------------------------
@@ -109,40 +116,46 @@ def analyze(
     j = len(c5) - 1
 
     required = [
-        ema20_5m[j],
-        ema50_5m[j],
-        ema9_1m[i],
-        ema21_1m[i],
-        rsi1m[i],
-        atr1m[i],
-        ema9_1m[i - 1],
+        ema20_5m[j], ema50_5m[j], ema9_1m[i], ema21_1m[i],
+        rsi1m[i], atr1m[i],
     ]
-
     if any(value is None for value in required):
         return no_signal("Indicators not ready")
 
-    # ---------------------------------------------------------
-    # CURRENT CANDLE
-    # ---------------------------------------------------------
+    try:
+        last = c1[i]
+        o = float(last["open"])
+        h = float(last["high"])
+        l = float(last["low"])
+        entry = float(last["close"])
+    except (KeyError, TypeError, ValueError):
+        return no_signal("Invalid candle format")
 
-    last = c1[i]
-    previous = c1[i - 1]
-
-    entry = float(last["close"])
     current_atr = float(atr1m[i])
     current_rsi = float(rsi1m[i])
 
     # ---------------------------------------------------------
-    # 5M TREND FILTER
+    # 5M TREND FILTER (looser than before: no need for
+    # close > EMA20 > EMA50 strictly, just EMA20/EMA50 order
+    # and price on the right side of EMA50)
     # ---------------------------------------------------------
 
-    trend_up = close5[j] > ema20_5m[j] > ema50_5m[j]
-    trend_down = close5[j] < ema20_5m[j] < ema50_5m[j]
-
+    trend_up = ema20_5m[j] > ema50_5m[j] and close5[j] > ema50_5m[j]
+    trend_down = ema20_5m[j] < ema50_5m[j] and close5[j] < ema50_5m[j]
     trend_5m = "UP" if trend_up else "DOWN" if trend_down else "SIDEWAYS"
 
-    # Isi indicators segera setelah dihitung, supaya ikut terkirim
-    # di semua jalur NO_SIGNAL berikutnya.
+    # ---------------------------------------------------------
+    # VOLUME (soft factor: boosts confidence, not a hard block)
+    # ---------------------------------------------------------
+
+    try:
+        volumes = [float(c.get("volume", 0)) for c in c1]
+    except (TypeError, ValueError):
+        return no_signal("Invalid volume data")
+
+    average_volume = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else 0
+    volume_confirmed = average_volume > 0 and volumes[i] >= average_volume * 1.0
+
     indicators_out.update({
         "ema20_5m": round(float(ema20_5m[j]), 8),
         "ema50_5m": round(float(ema50_5m[j]), 8),
@@ -151,153 +164,138 @@ def analyze(
         "rsi_1m": round(current_rsi, 4),
         "atr_1m": round(current_atr, 8),
         "trend_5m": trend_5m,
+        "volume_confirmed": volume_confirmed,
     })
 
     if entry <= 0 or current_atr <= 0:
         return no_signal("Invalid ATR or entry price")
 
+    if trend_5m == "SIDEWAYS":
+        return no_signal("5m trend is sideways")
+
+    # Skip candles that already ran too far (chasing)
+    if (h - l) > 2.5 * current_atr:
+        return no_signal("Entry candle too extended")
+
     # ---------------------------------------------------------
-    # VOLUME FILTER
+    # 1M TRIGGER
+    # Pullback = within the last 3 candles price touched EMA9
+    # Reclaim/Reject = current candle closes back beyond EMA9
     # ---------------------------------------------------------
+
+    recent = c1[i - 3:i]
 
     try:
-        volumes = [float(c.get("volume", 0)) for c in c1]
-    except (TypeError, ValueError):
-        return no_signal("Invalid volume data")
-
-    average_volume = (
-        sum(volumes[-21:-1]) / 20
-        if len(volumes) >= 21
-        else 0
-    )
-
-    volume_confirmed = (
-        average_volume > 0
-        and volumes[i] >= average_volume * 1.05
-    )
-
-    indicators_out["volume_confirmed"] = volume_confirmed
-
-    # ---------------------------------------------------------
-    # LONG SETUP
-    # ---------------------------------------------------------
+        pulled_back_long = any(
+            float(c["low"]) <= ema9_1m[i - 3 + k] for k, c in enumerate(recent)
+        )
+        pulled_back_short = any(
+            float(c["high"]) >= ema9_1m[i - 3 + k] for k, c in enumerate(recent)
+        )
+    except (KeyError, TypeError, ValueError):
+        return no_signal("Invalid candle format")
 
     long_signal = (
         trend_up
         and ema9_1m[i] > ema21_1m[i]
-
-        # Pullback toward EMA9
-        and float(previous["close"]) <= ema9_1m[i - 1]
-
-        # Reclaim EMA9
+        and pulled_back_long
         and entry > ema9_1m[i]
-
-        # Bullish candle
-        and float(last["close"]) > float(last["open"])
-
-        # Avoid chasing overbought price
-        and 50 <= current_rsi <= 68
+        and entry > o
+        and 45 <= current_rsi <= 70
     )
-
-    # ---------------------------------------------------------
-    # SHORT SETUP
-    # ---------------------------------------------------------
 
     short_signal = (
         trend_down
         and ema9_1m[i] < ema21_1m[i]
-
-        # Pullback toward EMA9
-        and float(previous["close"]) >= ema9_1m[i - 1]
-
-        # Rejection below EMA9
+        and pulled_back_short
         and entry < ema9_1m[i]
-
-        # Bearish candle
-        and float(last["close"]) < float(last["open"])
-
-        # Avoid chasing oversold price
-        and 32 <= current_rsi <= 50
+        and entry < o
+        and 30 <= current_rsi <= 55
     )
 
-    # ---------------------------------------------------------
-    # FILTER VALIDATION
-    # ---------------------------------------------------------
-
-    if not volume_confirmed:
-        return no_signal("Volume filter not met")
-
     if not long_signal and not short_signal:
-        return no_signal("No aligned 1m pullback trigger")
+        if trend_up:
+            return no_signal("5m uptrend, waiting for 1m pullback + EMA9 reclaim")
+        return no_signal("5m downtrend, waiting for 1m pullback + EMA9 rejection")
 
     # ---------------------------------------------------------
-    # DIRECTION AND RISK
+    # STOP LOSS / TAKE PROFIT (RR >= 1:2)
+    # Stop goes beyond the recent swing, clamped to 0.8x-2.0x ATR
+    # so it is neither noise-tight nor too wide.
     # ---------------------------------------------------------
+
+    swing_window = c1[i - 4:i + 1]
 
     if long_signal:
         direction = "LONG"
-
-        stop_loss = min(
-            float(last["low"]),
-            entry - 1.2 * current_atr,
-        )
-
-        risk = entry - stop_loss
-
-        take_profit = entry + min_rr * risk
-
+        swing_low = min(float(c["low"]) for c in swing_window)
+        raw_stop = swing_low - 0.1 * current_atr
+        risk = entry - raw_stop
+        risk = min(max(risk, 0.8 * current_atr), 2.0 * current_atr)
+        stop_loss = entry - risk
+        take_profit = entry + rr * risk
     else:
         direction = "SHORT"
+        swing_high = max(float(c["high"]) for c in swing_window)
+        raw_stop = swing_high + 0.1 * current_atr
+        risk = raw_stop - entry
+        risk = min(max(risk, 0.8 * current_atr), 2.0 * current_atr)
+        stop_loss = entry + risk
+        take_profit = entry - rr * risk
 
-        stop_loss = max(
-            float(last["high"]),
-            entry + 1.2 * current_atr,
-        )
-
-        risk = stop_loss - entry
-
-        take_profit = entry - min_rr * risk
-
-    if risk <= 0 or take_profit <= 0:
+    if risk <= 0 or stop_loss <= 0 or take_profit <= 0:
         return no_signal("Invalid risk geometry")
 
     # ---------------------------------------------------------
-    # POSITION SIZE
+    # POSITION SIZE + LEVERAGE
     # ---------------------------------------------------------
 
     risk_amount = capital * (risk_percent / 100.0)
-
-    # Quantity based on the risk budget and stop-loss distance.
     position_qty = risk_amount / risk
 
-    # Cap notional exposure using the requested leverage.
-    max_position_value = capital * max_leverage
-    max_position_qty = max_position_value / entry
+    # Leverage cap: user's max, and a liquidation-safety limit so the
+    # stop is hit well before liquidation (~80% of 1/leverage).
+    stop_pct = risk / entry
+    safe_leverage = max(1, int(math.floor(0.8 / stop_pct)))
+    effective_max_leverage = max(1.0, min(float(max_leverage), float(safe_leverage)))
 
+    max_position_qty = (capital * effective_max_leverage) / entry
     position_qty = min(position_qty, max_position_qty)
 
     position_value = position_qty * entry
-
     estimated_loss = position_qty * risk
+    leverage_used = max(1, int(math.ceil(position_value / capital)))
+    leverage_used = int(min(leverage_used, effective_max_leverage))
 
     # ---------------------------------------------------------
     # CONFIDENCE SCORE
     # ---------------------------------------------------------
 
-    confidence = 78
+    confidence = 60
 
     if volume_confirmed:
+        confidence += 10
+
+    # Strong 5m trend separation
+    if abs(ema20_5m[j] - ema50_5m[j]) / close5[j] >= 0.001:
+        confidence += 8
+
+    # RSI in momentum sweet spot
+    if direction == "LONG" and 52 <= current_rsi <= 65:
+        confidence += 7
+    if direction == "SHORT" and 35 <= current_rsi <= 48:
+        confidence += 7
+
+    # Price on the right side of the 5m EMA20
+    if (direction == "LONG" and close5[j] > ema20_5m[j]) or (
+        direction == "SHORT" and close5[j] < ema20_5m[j]
+    ):
         confidence += 5
 
-    if abs(current_rsi - 50) >= 5:
-        confidence += 3
-
-    confidence = min(confidence, 88)
+    confidence = min(confidence, 90)
 
     if confidence < min_confidence:
-        return no_signal(
-            f"Confidence {confidence} below minimum {min_confidence}"
-        )
+        return no_signal(f"Confidence {confidence} below minimum {min_confidence}")
 
     # ---------------------------------------------------------
     # RETURN SIGNAL
@@ -312,7 +310,7 @@ def analyze(
         "stop_loss": round(stop_loss, 8),
         "take_profit": round(take_profit, 8),
 
-        "rr": float(min_rr),
+        "rr": float(rr),
         "confidence": confidence,
 
         "capital": round(capital, 2),
@@ -324,10 +322,12 @@ def analyze(
         "estimated_loss": round(estimated_loss, 8),
 
         "max_leverage": float(max_leverage),
+        "leverage": leverage_used,
 
         "reason": (
-            "5m trend + 1m EMA pullback/reclaim "
-            "+ volume confirmation"
+            "5m trend + 1m EMA9 pullback/"
+            + ("reclaim" if direction == "LONG" else "rejection")
+            + (" + volume confirmation" if volume_confirmed else "")
         ),
 
         "timeframe_entry": "1m",
