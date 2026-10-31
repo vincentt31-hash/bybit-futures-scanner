@@ -95,10 +95,10 @@ def scan_default():
 
 def scan_one(symbol, request, latest_prices):
     try:
-        m5 = get_klines(symbol, "5m", 250)
-        m1 = get_klines(symbol, "1m", 250)
+        h1 = get_klines(symbol, "1h", 250)    # trend filter
+        m15 = get_klines(symbol, "15m", 250)  # entry timeframe
         result = analyze(
-            symbol, m5, m1,
+            symbol, h1, m15,
             capital=request.capital_usdt,
             risk_percent=request.risk_percent,
             max_leverage=request.max_leverage,
